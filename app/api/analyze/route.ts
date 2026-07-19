@@ -36,6 +36,38 @@ function getClientIp(req: Request): string {
   return req.headers.get("x-real-ip") || "unknown";
 }
 
+// Geçici Gemini yoğunluk/limit hatalarında (503/429) sessizce yeniden dener
+async function generateWithRetry(
+  model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
+  parts: Parameters<
+    ReturnType<GoogleGenerativeAI["getGenerativeModel"]>["generateContent"]
+  >[0],
+  maxRetries = 2
+) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await model.generateContent(parts);
+    } catch (err: unknown) {
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+      const isTransient =
+        message.includes("503") ||
+        message.includes("429") ||
+        message.includes("overloaded") ||
+        message.includes("high demand");
+
+      if (!isTransient || attempt === maxRetries) {
+        throw err;
+      }
+
+      // Exponential backoff: 1s, 2s
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
 // ── UGCMaxxing Master QC Prompt ──
 const MASTER_PROMPT = `You are the core AI Quality Control (QC) Engine for "RealHookUGC". Your strict operational protocol is directly derived from the "UGCMaxxing" playbook — the methodology behind 2 billion organic views across 62 mobile app campaigns.
 
@@ -208,7 +240,7 @@ export async function POST(req: Request) {
       },
     });
 
-    const result = await model.generateContent([
+    const result = await generateWithRetry(model, [
       {
         inlineData: {
           mimeType: "video/mp4",
@@ -235,11 +267,19 @@ export async function POST(req: Request) {
 
     return NextResponse.json(analysis);
   } catch (err: unknown) {
-    const message =
-      err instanceof Error
-        ? err.message
-        : "Unexpected error during video analysis.";
-    console.error("RealHookUGC analysis error:", message);
+    const rawMessage =
+      err instanceof Error ? err.message : "Unexpected error during video analysis.";
+
+    const isOverloaded =
+      rawMessage.includes("503") ||
+      rawMessage.includes("overloaded") ||
+      rawMessage.includes("high demand");
+
+    const message = isOverloaded
+      ? "Our AI engine is under heavy load right now. Please try again in a few seconds."
+      : rawMessage;
+
+    console.error("RealHookUGC analysis error:", rawMessage);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
