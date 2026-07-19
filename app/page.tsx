@@ -26,6 +26,14 @@ interface AnalysisResult {
     engagement_pacing: number;
     conversion_potential: number;
   };
+  structure_timeline?: {
+    video_duration_seconds: number;
+    hook_0_2s: boolean;
+    problem_2_4s: boolean;
+    product_3_7s: boolean;
+    proof_7_12s: boolean;
+    cta_final: boolean;
+  };
   standardized_feedback: string;
 }
 
@@ -353,6 +361,57 @@ export default function Home() {
                 );
               })}
             </div>
+
+            {/* 15-Second Formula Timeline */}
+            {result.structure_timeline && (
+              <div className="mb-6">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3 flex items-center justify-between">
+                  <span>The 15-Second Formula Timeline</span>
+                  <span className="text-slate-500 font-normal normal-case">
+                    ~{Math.round(result.structure_timeline.video_duration_seconds)}s
+                    total
+                  </span>
+                </h3>
+                <div className="grid grid-cols-5 gap-2">
+                  {[
+                    { key: "hook_0_2s", label: "Hook", sub: "0-2s" },
+                    { key: "problem_2_4s", label: "Problem", sub: "2-4s" },
+                    { key: "product_3_7s", label: "Product", sub: "3-7s" },
+                    { key: "proof_7_12s", label: "Proof", sub: "7-12s" },
+                    { key: "cta_final", label: "CTA", sub: "Final" },
+                  ].map((beat) => {
+                    const present =
+                      result.structure_timeline![
+                        beat.key as keyof typeof result.structure_timeline
+                      ];
+                    return (
+                      <div
+                        key={beat.key}
+                        className={`rounded-lg p-2 text-center border ${
+                          present
+                            ? "bg-emerald-500/10 border-emerald-500/30"
+                            : "bg-rose-500/10 border-rose-500/30"
+                        }`}
+                      >
+                        <div className="text-xs font-semibold text-slate-200">
+                          {beat.label}
+                        </div>
+                        <div className="text-[10px] text-slate-500 mb-1">
+                          {beat.sub}
+                        </div>
+                        <div
+                          className={
+                            present ? "text-emerald-400" : "text-rose-400"
+                          }
+                        >
+                          {present ? "✓" : "✗"}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Standardized Feedback */}
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">

@@ -6,6 +6,36 @@ export const maxDuration = 60;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
+// ── Simple in-memory rate limiter ──
+// Not persistent across cold starts / multiple instances, but stops casual abuse.
+// Matches the "3 free daily scans" promise on the landing page.
+const DAILY_LIMIT = 3;
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(ip: string): { allowed: boolean; remaining: number } {
+  const now = Date.now();
+  const entry = rateLimitMap.get(ip);
+
+  if (!entry || now > entry.resetAt) {
+    // 24 saatlik yeni pencere
+    rateLimitMap.set(ip, { count: 1, resetAt: now + 24 * 60 * 60 * 1000 });
+    return { allowed: true, remaining: DAILY_LIMIT - 1 };
+  }
+
+  if (entry.count >= DAILY_LIMIT) {
+    return { allowed: false, remaining: 0 };
+  }
+
+  entry.count += 1;
+  return { allowed: true, remaining: DAILY_LIMIT - entry.count };
+}
+
+function getClientIp(req: Request): string {
+  const forwarded = req.headers.get("x-forwarded-for");
+  if (forwarded) return forwarded.split(",")[0].trim();
+  return req.headers.get("x-real-ip") || "unknown";
+}
+
 // ── UGCMaxxing Master QC Prompt ──
 const MASTER_PROMPT = `You are the core AI Quality Control (QC) Engine for "RealHookUGC". Your strict operational protocol is directly derived from the "UGCMaxxing" playbook — the methodology behind 2 billion organic views across 62 mobile app campaigns.
 
@@ -47,6 +77,8 @@ Evaluate the video against these EXACT 5 PLAYBOOK CRITERIA (Score each 1.0 to 5.
   * "clean background" — when setting is cluttered
   * "first frame must be compelling" — when the opening wouldn't stop a scroll
 
+Additionally, check the video's actual runtime against the "15-Second Formula" structure. This is a PACING TEMPLATE, not a hard duration limit — a video can run longer, but the beats should land roughly in this order: Hook (0-2s) → Problem/Context (2-4s) → Product Intro (3-7s) → Visual Payoff/Proof (7-12s) → CTA (final 2-3s). For each beat, judge whether it is present and roughly on-time based on what you observe in the video.
+
 OUTPUT FORMAT (Strict JSON ONLY — no markdown fences, no preamble):
 {
   "overall_score": <number, average of 5 scores rounded to 1 decimal>,
@@ -58,6 +90,14 @@ OUTPUT FORMAT (Strict JSON ONLY — no markdown fences, no preamble):
     "brand_alignment_organicity": <1.0-5.0>,
     "engagement_pacing": <1.0-5.0>,
     "conversion_potential": <1.0-5.0>
+  },
+  "structure_timeline": {
+    "video_duration_seconds": <estimated total video length in seconds>,
+    "hook_0_2s": <true|false>,
+    "problem_2_4s": <true|false>,
+    "product_3_7s": <true|false>,
+    "proof_7_12s": <true|false>,
+    "cta_final": <true|false>
   },
   "standardized_feedback": "<One single, direct, brutal instruction for the content creator.>"
 }`;
@@ -112,6 +152,19 @@ async function downloadTikTokVideo(
 // ── POST /api/analyze ──
 export async function POST(req: Request) {
   try {
+    const ip = getClientIp(req);
+    const { allowed, remaining } = checkRateLimit(ip);
+
+    if (!allowed) {
+      return NextResponse.json(
+        {
+          error:
+            "You've hit today's free scan limit (3/day). Upgrade to PRO for unlimited scans, or come back tomorrow.",
+        },
+        { status: 429 }
+      );
+    }
+
     const body = await req.json();
     const { url } = body;
 
