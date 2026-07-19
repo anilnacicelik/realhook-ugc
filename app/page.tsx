@@ -498,7 +498,9 @@ export default function Home() {
 
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
               <a
-                href="#checkout"
+                href="https://realhookugc.lemonsqueezy.com/checkout/buy/54ee2980-24be-4f18-8670-6fc74304122a"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="bg-white hover:bg-slate-100 text-slate-950 font-bold px-8 py-4 rounded-xl transition shadow-xl text-center flex items-center justify-center gap-2"
               >
                 Get PRO Access — $39/month
