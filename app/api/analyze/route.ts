@@ -1,118 +1,192 @@
 import { NextResponse } from "next/server";
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// OpenAI istemcisini başlatıyoruz
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || "dummy_key",
-});
+// Vercel Hobby: max 60 saniye timeout
+export const maxDuration = 60;
 
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+
+// ── UGCMaxxing Master QC Prompt ──
+const MASTER_PROMPT = `You are the core AI Quality Control (QC) Engine for "RealHookUGC". Your strict operational protocol is directly derived from the "UGCMaxxing" playbook — the methodology behind 2 billion organic views across 62 mobile app campaigns.
+
+You are given an actual UGC video file. Watch it carefully, frame by frame, and score it systematically. You do NOT care about vanity metrics or polish. You only care about authenticity, hook retention, and conversion.
+
+Evaluate the video against these EXACT 5 PLAYBOOK CRITERIA (Score each 1.0 to 5.0):
+
+1. HOOK STRENGTH (0-2 Seconds):
+- The first 0.5 seconds determines 90% of performance.
+- WHAT WORKS (+ points): On-screen native text overlay, sudden movement, a direct question to viewer, a surprising stat or claim.
+- WHAT KILLS IT (- points / automatic fail signals): Slow pan, logo intro, dead silence in first 0.5s, generic greetings like "Hey guys" or "Hi everyone".
+
+2. CLARITY & ENVIRONMENT:
+- Audio must be crisp and clearly audible.
+- Framing must be intentional. Setting MUST be a "clean background" (no cluttered rooms, messy desks, or distracting elements).
+- If audio is muffled, echoey, or has background noise, score lower.
+
+3. BRAND ALIGNMENT & PORTFOLIO FLUENCY:
+- The video MUST look and feel like an organic, raw social media post — not a polished ad.
+- If it looks or sounds like a corporate commercial, a scripted ad read, or uses an AI-generated avatar/voice, score it severely low.
+- Corporate language patterns to detect: listing features instead of benefits, overly enthusiastic fake energy, "download link in bio" as the only CTA approach.
+
+4. ENGAGEMENT STYLE & PACING:
+- Energy must feel natural and match the product context.
+- If the speech tempo drags or edits feel sluggish, apply the playbook rule: recommend "speed up to 1.1x".
+- Check compliance with the "15-Second Formula": Hook (0-2s) → Problem/Context (2-4s) → Product Intro (3-7s) → Visual Payoff with Proof (7-12s) → CTA (Final 2-3s).
+- Transitions should feel native to the platform (TikTok/Reels style cuts, not corporate dissolves).
+
+5. CONVERSION POTENTIAL:
+- Does the video focus on 2-4 core BENEFITS (not a boring list of technical features)?
+- Is there a clear visual demonstration or transformation ("before/after", screen recording, real result)?
+- Would a viewer genuinely want to download the app immediately after watching?
+
+*** THE ONE-ROUND RULE & REJECTION THRESHOLD ***
+- If ANY of the 5 categories scores 2.0 or below, the OVERALL status MUST be "REJECTED".
+- Provide ONLY ONE actionable revision note (The One-Round Rule — at 590 creators, multiple revision rounds become an operational bottleneck). Use exact "Standardized Feedback Language" from the playbook where applicable:
+  * "speed up to 1.1x" — when pacing drags
+  * "needs a stronger visual hook" — when first frame is weak
+  * "clean background" — when setting is cluttered
+  * "first frame must be compelling" — when the opening wouldn't stop a scroll
+
+OUTPUT FORMAT (Strict JSON ONLY — no markdown fences, no preamble):
+{
+  "overall_score": <number, average of 5 scores rounded to 1 decimal>,
+  "status": "APPROVED" | "REJECTED",
+  "rejection_reason": <string describing the exact failing rule, or null if approved>,
+  "category_scores": {
+    "hook_strength": <1.0-5.0>,
+    "clarity_environment": <1.0-5.0>,
+    "brand_alignment_organicity": <1.0-5.0>,
+    "engagement_pacing": <1.0-5.0>,
+    "conversion_potential": <1.0-5.0>
+  },
+  "standardized_feedback": "<One single, direct, brutal instruction for the content creator.>"
+}`;
+
+// ── TikTok video indirme ──
+async function downloadTikTokVideo(
+  url: string
+): Promise<{ buffer: Buffer; caption: string }> {
+  // tikwm.com ücretsiz API — TikTok CDN video linkini çözer
+  const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`;
+  const resp = await fetch(apiUrl, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; RealHookUGC/1.0)" },
+  });
+
+  if (!resp.ok) {
+    throw new Error(
+      "Could not resolve TikTok video. Make sure the link is public and try again."
+    );
+  }
+
+  const json = await resp.json();
+
+  // json.data.play = watermark'sız mp4, json.data.wmplay = watermark'lı (daha küçük)
+  const videoUrl = json.data?.play || json.data?.wmplay;
+  if (!videoUrl) {
+    throw new Error(
+      "Could not extract video download link. The video may be private or deleted."
+    );
+  }
+
+  const videoResp = await fetch(videoUrl);
+  if (!videoResp.ok) {
+    throw new Error("Failed to download the video file from TikTok CDN.");
+  }
+
+  const arrayBuf = await videoResp.arrayBuffer();
+  const buffer = Buffer.from(arrayBuf);
+
+  // Gemini inline data limiti ~20 MB
+  if (buffer.length > 20 * 1024 * 1024) {
+    throw new Error(
+      "Video file exceeds 20 MB. Please test with a shorter or lower-resolution clip."
+    );
+  }
+
+  return {
+    buffer,
+    caption: json.data?.title || json.data?.desc || "",
+  };
+}
+
+// ── POST /api/analyze ──
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const { url } = body;
 
-    if (!url) {
+    if (!url || typeof url !== "string" || !url.startsWith("http")) {
       return NextResponse.json(
-        { error: "Video URL is required" },
+        { error: "Please paste a valid video URL." },
         { status: 400 }
       );
     }
 
-    // Eğer kullanıcı henüz .env.local dosyasını doldurmadıysa sistem çökmek yerine uyarı/mock dönsün
-    if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === "dummy_key") {
-      console.warn("OPENAI_API_KEY bulunamadı. Örnek (Mock) veri dönülüyor.");
-      return NextResponse.json({
-        overall_score: 2.1,
-        status: "REJECTED",
-        rejection_reason: "Failed The 0.5-Second Rule & Corporate Ad Language",
-        category_scores: {
-          hook_strength: 1.5,
-          clarity_environment: 4.0,
-          brand_alignment_organicity: 1.5,
-          engagement_pacing: 2.0,
-          conversion_potential: 1.5,
-        },
-        standardized_feedback: "needs a stronger visual hook — cut the corporate greeting, speed up to 1.1x, and add native text on the first frame.",
-      });
+    if (!process.env.GEMINI_API_KEY) {
+      return NextResponse.json(
+        { error: "Server configuration error — AI engine key is missing." },
+        { status: 500 }
+      );
     }
 
-    /* 
-      1. GERÇEK PRODÜKSİYON SENARYOSU: 
-      Burada Apify API kullanılarak gelen URL'den videonun metni (transcript) 
-      ve video kareleri çekilir. Şimdi yapay zekayı doğrudan UGCMaxxing kurallarına
-      göre analiz yapması için tetikliyoruz:
-    */
+    // Platform kontrolü
+    const isTikTok =
+      url.includes("tiktok.com") || url.includes("vm.tiktok.com");
 
-    const systemPrompt = `You are the core AI Quality Control (QC) Engine for "RealHookUGC". Your strict operational protocol is directly derived from the "UGCMaxxing" playbook (2 billion organic views methodology).
+    if (!isTikTok) {
+      return NextResponse.json(
+        {
+          error:
+            "Currently only TikTok links are supported. Instagram Reels support is coming soon.",
+        },
+        { status: 400 }
+      );
+    }
 
-Your job is to analyze mobile app UGC videos and score them systematically. You do NOT care about vanity metrics or polish. You only care about authenticity, hook retention, and conversion.
+    // 1) Videoyu TikTok'tan gerçekten indir
+    const { buffer, caption } = await downloadTikTokVideo(url);
 
-Evaluate the video (represented by this link/content: ${url}) against these EXACT 5 PLAYBOOK CRITERIA (Score each 1.0 to 5.0):
-
-1. HOOK STRENGTH (0-2 Seconds):
-- The first 0.5 seconds determines 90% of performance.
-- WHAT WORKS (+ points): On-screen native text, sudden movement, a direct hook question, a surprising stat.
-- WHAT KILLS IT (- points / automatic fail): Slow pan, logo intro, dead silence, saying "Hey guys / Merhaba arkadaşlar".
-
-2. CLARITY & ENVIRONMENT:
-- Audio must be crisp and clear. Setting MUST be a "clean background" (no cluttered rooms).
-
-3. BRAND ALIGNMENT & PORTFOLIO FLUENCY:
-- The video MUST look like an organic, raw social media post.
-- If it looks or sounds like a polished corporate commercial or an AI-generated avatar, score it severely low. No corporate language!
-
-4. ENGAGEMENT STYLE & PACING:
-- Evaluate pacing. If the speech or edit drags, apply the playbook rule: "speed up to 1.1x".
-- Check the "15-Second Formula": Hook (0-2s) -> Problem (2-4s) -> Product Intro (3-7s) -> Visual Payoff/Proof (7-12s) -> CTA (Final 2-3s).
-
-5. CONVERSION POTENTIAL:
-- Focus on 2-4 core benefits (NOT a list of boring features). Would the viewer download the app immediately?
-
-*** THE ONE-ROUND RULE & REJECTION THRESHOLD ***
-- If ANY of the 5 categories scores 2.0 or below, the OVERALL status MUST be "REJECTED".
-- Provide ONLY ONE actionable note for revision (The One-Round Rule). Use exact "Standardized Feedback Language":
-  * "speed up to 1.1x" (if pacing drags)
-  * "needs a stronger visual hook" (if first frame is weak)
-  * "clean background" (if setting is cluttered)
-  * "first frame must be compelling" (if thumbnail/start wouldn't stop a scroll)
-
-OUTPUT FORMAT (Strict JSON ONLY):
-{
-  "overall_score": [Average score rounded to 1 decimal, e.g., 4.2],
-  "status": ["APPROVED" or "REJECTED"],
-  "rejection_reason": [Null if approved, or specify exact failing rule],
-  "category_scores": {
-    "hook_strength": [1.0-5.0],
-    "clarity_environment": [1.0-5.0],
-    "brand_alignment_organicity": [1.0-5.0],
-    "engagement_pacing": [1.0-5.0],
-    "conversion_potential": [1.0-5.0]
-  },
-  "standardized_feedback": "One single, direct, brutal instruction for the creator based on the playbook vocabulary."
-}`;
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { 
-          role: "user", 
-          content: `Analyze this mobile app UGC video URL according to the UGCMaxxing playbook rules and output strictly valid JSON: ${url}` 
-        }
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0.3, // Daha tutarlı ve acımasız denetim için düşük sıcaklık
+    // 2) Gemini'ye videoyu base64 olarak gönder — gerçek kare kare analiz
+    const model = genAI.getGenerativeModel({
+      model: "gemini-2.5-flash",
+      generationConfig: {
+        responseMimeType: "application/json",
+        temperature: 0.3,
+      },
     });
 
-    const aiResult = JSON.parse(completion.choices[0].message.content || "{}");
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          mimeType: "video/mp4",
+          data: buffer.toString("base64"),
+        },
+      },
+      {
+        text: `${MASTER_PROMPT}\n\nVideo caption from the platform: "${caption}"\n\nWatch the entire video carefully, then output your strict JSON analysis.`,
+      },
+    ]);
 
-    return NextResponse.json(aiResult);
+    const text = result.response.text();
 
-  } catch (error: any) {
-    console.error("Analysis API Error:", error);
-    return NextResponse.json(
-      { error: "Failed to analyze video content" },
-      { status: 500 }
-    );
+    let analysis;
+    try {
+      analysis = JSON.parse(text);
+    } catch {
+      console.error("Gemini returned non-JSON:", text);
+      return NextResponse.json(
+        { error: "AI returned an unexpected response. Please try again." },
+        { status: 502 }
+      );
+    }
+
+    return NextResponse.json(analysis);
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error
+        ? err.message
+        : "Unexpected error during video analysis.";
+    console.error("RealHookUGC analysis error:", message);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
