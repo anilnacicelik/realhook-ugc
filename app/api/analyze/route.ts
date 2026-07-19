@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenerativeAI, SchemaType, Schema } from "@google/generative-ai";
 
 // Vercel Hobby: max 60 saniye timeout
 export const maxDuration = 60;
@@ -35,6 +35,62 @@ function getClientIp(req: Request): string {
   if (forwarded) return forwarded.split(",")[0].trim();
   return req.headers.get("x-real-ip") || "unknown";
 }
+
+// Gemini'nin JSON çıktısında hiçbir alanı atlamamasını garantiye alan katı şema.
+// Free-form "please include this field" talimatına güvenmek yerine, modeli
+// yapısal olarak zorluyoruz.
+const responseSchema: Schema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    overall_score: { type: SchemaType.NUMBER },
+    status: { type: SchemaType.STRING, format: "enum", enum: ["APPROVED", "REJECTED"] },
+    rejection_reason: { type: SchemaType.STRING, nullable: true },
+    category_scores: {
+      type: SchemaType.OBJECT,
+      properties: {
+        hook_strength: { type: SchemaType.NUMBER },
+        clarity_environment: { type: SchemaType.NUMBER },
+        brand_alignment_organicity: { type: SchemaType.NUMBER },
+        engagement_pacing: { type: SchemaType.NUMBER },
+        conversion_potential: { type: SchemaType.NUMBER },
+      },
+      required: [
+        "hook_strength",
+        "clarity_environment",
+        "brand_alignment_organicity",
+        "engagement_pacing",
+        "conversion_potential",
+      ],
+    },
+    structure_timeline: {
+      type: SchemaType.OBJECT,
+      properties: {
+        video_duration_seconds: { type: SchemaType.NUMBER },
+        hook_0_2s: { type: SchemaType.BOOLEAN },
+        problem_2_4s: { type: SchemaType.BOOLEAN },
+        product_3_7s: { type: SchemaType.BOOLEAN },
+        proof_7_12s: { type: SchemaType.BOOLEAN },
+        cta_final: { type: SchemaType.BOOLEAN },
+      },
+      required: [
+        "video_duration_seconds",
+        "hook_0_2s",
+        "problem_2_4s",
+        "product_3_7s",
+        "proof_7_12s",
+        "cta_final",
+      ],
+    },
+    standardized_feedback: { type: SchemaType.STRING },
+  },
+  required: [
+    "overall_score",
+    "status",
+    "category_scores",
+    "structure_timeline",
+    "standardized_feedback",
+  ],
+};
 
 // Geçici Gemini yoğunluk/limit hatalarında (503/429) sessizce yeniden dener
 async function generateWithRetry(
@@ -236,6 +292,7 @@ export async function POST(req: Request) {
       model: "gemini-2.5-flash",
       generationConfig: {
         responseMimeType: "application/json",
+        responseSchema: responseSchema,
         temperature: 0.3,
       },
     });
