@@ -1,14 +1,11 @@
 import { NextResponse } from "next/server";
 import { GoogleGenerativeAI, SchemaType, Schema } from "@google/generative-ai";
 
-// Vercel Hobby: max 60 saniye timeout
 export const maxDuration = 60;
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
-// ── Simple in-memory rate limiter ──
-// Not persistent across cold starts / multiple instances, but stops casual abuse.
-// Matches the "3 free daily scans" promise on the landing page.
+// ── Simple in-memory rate limiter (free tier only) ──
 const DAILY_LIMIT = 3;
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 
@@ -17,7 +14,6 @@ function checkRateLimit(ip: string): { allowed: boolean; remaining: number } {
   const entry = rateLimitMap.get(ip);
 
   if (!entry || now > entry.resetAt) {
-    // 24 saatlik yeni pencere
     rateLimitMap.set(ip, { count: 1, resetAt: now + 24 * 60 * 60 * 1000 });
     return { allowed: true, remaining: DAILY_LIMIT - 1 };
   }
@@ -36,9 +32,35 @@ function getClientIp(req: Request): string {
   return req.headers.get("x-real-ip") || "unknown";
 }
 
-// Gemini'nin JSON çıktısında hiçbir alanı atlamamasını garantiye alan katı şema.
-// Free-form "please include this field" talimatına güvenmek yerine, modeli
-// yapısal olarak zorluyoruz.
+// ── Lemon Squeezy license validation ──
+async function isLicenseValid(licenseKey: string | undefined): Promise<boolean> {
+  if (!licenseKey || typeof licenseKey !== "string" || !licenseKey.trim()) {
+    return false;
+  }
+
+  try {
+    const params = new URLSearchParams();
+    params.append("license_key", licenseKey.trim());
+
+    const resp = await fetch("https://api.lemonsqueezy.com/v1/licenses/validate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: params.toString(),
+    });
+
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    return Boolean(data.valid);
+  } catch (err) {
+    console.error("License validation error:", err);
+    return false;
+  }
+}
+
+// ── Gemini strict response schema ──
 const responseSchema: Schema = {
   type: SchemaType.OBJECT,
   properties: {
@@ -91,38 +113,6 @@ const responseSchema: Schema = {
     "standardized_feedback",
   ],
 };
-
-// Geçici Gemini yoğunluk/limit hatalarında (503/429) sessizce yeniden dener
-async function generateWithRetry(
-  model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
-  parts: Parameters<
-    ReturnType<GoogleGenerativeAI["getGenerativeModel"]>["generateContent"]
-  >[0],
-  maxRetries = 2
-) {
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await model.generateContent(parts);
-    } catch (err: unknown) {
-      lastError = err;
-      const message = err instanceof Error ? err.message : String(err);
-      const isTransient =
-        message.includes("503") ||
-        message.includes("429") ||
-        message.includes("overloaded") ||
-        message.includes("high demand");
-
-      if (!isTransient || attempt === maxRetries) {
-        throw err;
-      }
-
-      // Exponential backoff: 1s, 2s
-      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-    }
-  }
-  throw lastError;
-}
 
 // ── UGCMaxxing Master QC Prompt ──
 const MASTER_PROMPT = `You are the core AI Quality Control (QC) Engine for "RealHookUGC". Your strict operational protocol is directly derived from the "UGCMaxxing" playbook — the methodology behind 2 billion organic views across 62 mobile app campaigns.
@@ -190,11 +180,74 @@ OUTPUT FORMAT (Strict JSON ONLY — no markdown fences, no preamble):
   "standardized_feedback": "<One single, direct, brutal instruction for the content creator.>"
 }`;
 
-// ── TikTok video indirme ──
-async function downloadTikTokVideo(
+// ── PRIMARY: Apify TikTok scraper ──
+// Uses the "clockworks/tiktok-scraper" community actor via the synchronous
+// run endpoint. If the actor's input/output field names have changed since
+// this was written, this will simply return null and the caller falls back
+// to the tikwm path below — the site keeps working either way.
+async function downloadTikTokViaApify(
+  url: string,
+  apifyToken: string
+): Promise<{ buffer: Buffer; caption: string } | null> {
+  try {
+    const runResp = await fetch(
+      `https://api.apify.com/v2/acts/clockworks~tiktok-scraper/run-sync-get-dataset-items?token=${apifyToken}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          postURLs: [url],
+          resultsPerPage: 1,
+          shouldDownloadVideos: false,
+          shouldDownloadCovers: false,
+          shouldDownloadSubtitles: false,
+        }),
+      }
+    );
+
+    if (!runResp.ok) {
+      console.warn("Apify run failed with status", runResp.status);
+      return null;
+    }
+
+    const items = await runResp.json();
+    if (!Array.isArray(items) || items.length === 0) {
+      console.warn("Apify returned no items for this URL");
+      return null;
+    }
+
+    const item = items[0];
+    const videoUrl: string | undefined =
+      item?.videoMeta?.downloadAddr ||
+      item?.videoUrl ||
+      item?.mediaUrls?.[0] ||
+      item?.video?.downloadAddr;
+
+    if (!videoUrl) {
+      console.warn("Apify item had no resolvable video URL, raw item:", JSON.stringify(item).slice(0, 300));
+      return null;
+    }
+
+    const videoResp = await fetch(videoUrl);
+    if (!videoResp.ok) return null;
+
+    const buffer = Buffer.from(await videoResp.arrayBuffer());
+    if (buffer.length > 20 * 1024 * 1024) return null;
+
+    return {
+      buffer,
+      caption: item?.text || item?.desc || "",
+    };
+  } catch (err) {
+    console.error("Apify TikTok download failed, will fall back to tikwm:", err);
+    return null;
+  }
+}
+
+// ── FALLBACK: tikwm.com (free, unofficial) ──
+async function downloadTikTokViaTikwm(
   url: string
 ): Promise<{ buffer: Buffer; caption: string }> {
-  // tikwm.com ücretsiz API — TikTok CDN video linkini çözer
   const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`;
   const resp = await fetch(apiUrl, {
     headers: { "User-Agent": "Mozilla/5.0 (compatible; RealHookUGC/1.0)" },
@@ -207,8 +260,6 @@ async function downloadTikTokVideo(
   }
 
   const json = await resp.json();
-
-  // json.data.play = watermark'sız mp4, json.data.wmplay = watermark'lı (daha küçük)
   const videoUrl = json.data?.play || json.data?.wmplay;
   if (!videoUrl) {
     throw new Error(
@@ -224,7 +275,6 @@ async function downloadTikTokVideo(
   const arrayBuf = await videoResp.arrayBuffer();
   const buffer = Buffer.from(arrayBuf);
 
-  // Gemini inline data limiti ~20 MB
   if (buffer.length > 20 * 1024 * 1024) {
     throw new Error(
       "Video file exceeds 20 MB. Please test with a shorter or lower-resolution clip."
@@ -237,24 +287,76 @@ async function downloadTikTokVideo(
   };
 }
 
+// ── Combined download: Apify first (if token present), tikwm fallback ──
+async function downloadTikTokVideo(
+  url: string
+): Promise<{ buffer: Buffer; caption: string; source: "apify" | "tikwm" }> {
+  const apifyToken = process.env.APIFY_API_TOKEN;
+
+  if (apifyToken) {
+    const viaApify = await downloadTikTokViaApify(url, apifyToken);
+    if (viaApify) {
+      return { ...viaApify, source: "apify" };
+    }
+    console.warn("Falling back to tikwm for this request.");
+  }
+
+  const viaTikwm = await downloadTikTokViaTikwm(url);
+  return { ...viaTikwm, source: "tikwm" };
+}
+
+// ── Retry wrapper for transient Gemini overload errors ──
+async function generateWithRetry(
+  model: ReturnType<GoogleGenerativeAI["getGenerativeModel"]>,
+  parts: Parameters<
+    ReturnType<GoogleGenerativeAI["getGenerativeModel"]>["generateContent"]
+  >[0],
+  maxRetries = 2
+) {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await model.generateContent(parts);
+    } catch (err: unknown) {
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+      const isTransient =
+        message.includes("503") ||
+        message.includes("429") ||
+        message.includes("overloaded") ||
+        message.includes("high demand");
+
+      if (!isTransient || attempt === maxRetries) {
+        throw err;
+      }
+
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    }
+  }
+  throw lastError;
+}
+
 // ── POST /api/analyze ──
 export async function POST(req: Request) {
   try {
-    const ip = getClientIp(req);
-    const { allowed, remaining } = checkRateLimit(ip);
-
-    if (!allowed) {
-      return NextResponse.json(
-        {
-          error:
-            "You've hit today's free scan limit (3/day). Upgrade to PRO for unlimited scans, or come back tomorrow.",
-        },
-        { status: 429 }
-      );
-    }
-
     const body = await req.json();
-    const { url } = body;
+    const { url, licenseKey } = body;
+
+    const isPro = await isLicenseValid(licenseKey);
+
+    if (!isPro) {
+      const ip = getClientIp(req);
+      const { allowed } = checkRateLimit(ip);
+      if (!allowed) {
+        return NextResponse.json(
+          {
+            error:
+              "You've hit today's free scan limit (3/day). Upgrade to PRO for unlimited scans, or come back tomorrow.",
+          },
+          { status: 429 }
+        );
+      }
+    }
 
     if (!url || typeof url !== "string" || !url.startsWith("http")) {
       return NextResponse.json(
@@ -270,10 +372,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Platform kontrolü
-    const isTikTok =
-      url.includes("tiktok.com") || url.includes("vm.tiktok.com");
-
+    const isTikTok = url.includes("tiktok.com") || url.includes("vm.tiktok.com");
     if (!isTikTok) {
       return NextResponse.json(
         {
@@ -284,10 +383,9 @@ export async function POST(req: Request) {
       );
     }
 
-    // 1) Videoyu TikTok'tan gerçekten indir
-    const { buffer, caption } = await downloadTikTokVideo(url);
+    const { buffer, caption, source } = await downloadTikTokVideo(url);
+    console.log(`Video downloaded via: ${source}`);
 
-    // 2) Gemini'ye videoyu base64 olarak gönder — gerçek kare kare analiz
     const model = genAI.getGenerativeModel({
       model: "gemini-2.5-flash",
       generationConfig: {
@@ -322,7 +420,7 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.json(analysis);
+    return NextResponse.json({ ...analysis, isPro });
   } catch (err: unknown) {
     const rawMessage =
       err instanceof Error ? err.message : "Unexpected error during video analysis.";

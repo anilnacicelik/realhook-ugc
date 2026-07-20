@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   ShieldAlert,
   CheckCircle2,
@@ -13,6 +13,8 @@ import {
   Lock,
   Play,
   XCircle,
+  KeyRound,
+  Crown,
 } from "lucide-react";
 
 interface AnalysisResult {
@@ -37,6 +39,8 @@ interface AnalysisResult {
   standardized_feedback: string;
 }
 
+const LICENSE_STORAGE_KEY = "rhu_license_key";
+
 export default function Home() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -44,6 +48,71 @@ export default function Home() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+
+  // ── PRO / License state ──
+  const [licenseKey, setLicenseKey] = useState<string | null>(null);
+  const [isPro, setIsPro] = useState(false);
+  const [showLicenseInput, setShowLicenseInput] = useState(false);
+  const [licenseInputValue, setLicenseInputValue] = useState("");
+  const [licenseChecking, setLicenseChecking] = useState(false);
+  const [licenseError, setLicenseError] = useState<string | null>(null);
+
+  // Sayfa yüklendiğinde daha önce kaydedilmiş bir lisans var mı bak
+  useEffect(() => {
+    const stored = localStorage.getItem(LICENSE_STORAGE_KEY);
+    if (stored) {
+      setLicenseKey(stored);
+      verifyLicense(stored, true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const verifyLicense = async (key: string, silent = false) => {
+    setLicenseChecking(true);
+    if (!silent) setLicenseError(null);
+    try {
+      const resp = await fetch("/api/verify-license", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ licenseKey: key }),
+      });
+      const data = await resp.json();
+
+      if (data.valid) {
+        setIsPro(true);
+        setLicenseKey(key);
+        localStorage.setItem(LICENSE_STORAGE_KEY, key);
+        setShowLicenseInput(false);
+      } else {
+        setIsPro(false);
+        localStorage.removeItem(LICENSE_STORAGE_KEY);
+        if (!silent) {
+          setLicenseError(
+            data.error || "This license key isn't valid or active."
+          );
+        }
+      }
+    } catch {
+      if (!silent) {
+        setLicenseError("Couldn't verify the license right now. Try again.");
+      }
+    } finally {
+      setLicenseChecking(false);
+    }
+  };
+
+  const handleActivateLicense = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!licenseInputValue.trim()) return;
+    verifyLicense(licenseInputValue.trim());
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem(LICENSE_STORAGE_KEY);
+    setIsPro(false);
+    setLicenseKey(null);
+    setLicenseInputValue("");
+  };
 
   const handleAnalyze = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -53,7 +122,6 @@ export default function Home() {
     setResult(null);
     setError(null);
 
-    // Gerçek pipeline adımlarını yansıtan yükleme mesajları
     setLoadingStep("Downloading video from TikTok...");
     const t1 = setTimeout(
       () => setLoadingStep("Sending video to AI engine..."),
@@ -76,7 +144,7 @@ export default function Home() {
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
+        body: JSON.stringify({ url, licenseKey: licenseKey || undefined }),
       });
 
       const data = await response.json();
@@ -119,18 +187,65 @@ export default function Home() {
               RealHook<span className="text-rose-500">UGC</span>
             </span>
           </div>
-          <div className="flex items-center gap-4 text-sm font-medium">
+          <div className="flex items-center gap-3 text-sm font-medium">
             <span className="text-slate-400 hidden sm:inline">
               The 0.5-Second Engine for App Founders
             </span>
-            <a
-              href="#pro"
-              className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-lg border border-slate-700 transition"
-            >
-              PRO Login
-            </a>
+            {isPro ? (
+              <button
+                onClick={handleLogout}
+                className="bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 px-4 py-2 rounded-lg border border-amber-500/30 transition flex items-center gap-1.5"
+              >
+                <Crown className="w-3.5 h-3.5 fill-current" />
+                PRO Active
+              </button>
+            ) : (
+              <button
+                onClick={() => setShowLicenseInput((s) => !s)}
+                className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-lg border border-slate-700 transition flex items-center gap-1.5"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                PRO Login
+              </button>
+            )}
           </div>
         </div>
+
+        {/* License Key Input Dropdown */}
+        {showLicenseInput && !isPro && (
+          <div className="border-t border-slate-800/80 bg-slate-900/80 backdrop-blur">
+            <div className="max-w-6xl mx-auto px-4 py-4">
+              <form
+                onSubmit={handleActivateLicense}
+                className="flex flex-col sm:flex-row gap-2 max-w-md"
+              >
+                <input
+                  type="text"
+                  placeholder="Paste your license key (from Lemon Squeezy receipt)"
+                  value={licenseInputValue}
+                  onChange={(e) => setLicenseInputValue(e.target.value)}
+                  className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                />
+                <button
+                  type="submit"
+                  disabled={licenseChecking}
+                  className="bg-rose-600 hover:bg-rose-500 text-white text-sm font-semibold px-4 py-2 rounded-lg transition disabled:opacity-50 whitespace-nowrap"
+                >
+                  {licenseChecking ? "Checking..." : "Activate"}
+                </button>
+              </form>
+              {licenseError && (
+                <p className="text-xs text-rose-400 mt-2">{licenseError}</p>
+              )}
+              <p className="text-xs text-slate-500 mt-2">
+                Don&apos;t have a key yet?{" "}
+                <a href="#pro" className="text-rose-400 hover:underline">
+                  Get PRO access
+                </a>
+              </p>
+            </div>
+          </div>
+        )}
       </nav>
 
       {/* Hero Section */}
@@ -193,11 +308,18 @@ export default function Home() {
           </div>
         )}
 
-        <div className="flex items-center justify-center gap-6 text-xs text-slate-500 font-medium">
-          <span className="flex items-center gap-1.5">
-            <Check className="w-3.5 h-3.5 text-emerald-500" /> 3 Free Daily
-            Scans
-          </span>
+        <div className="flex items-center justify-center gap-6 text-xs text-slate-500 font-medium flex-wrap">
+          {isPro ? (
+            <span className="flex items-center gap-1.5 text-amber-400">
+              <Crown className="w-3.5 h-3.5 fill-current" /> Unlimited PRO
+              Scans
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5">
+              <Check className="w-3.5 h-3.5 text-emerald-500" /> 3 Free Daily
+              Scans
+            </span>
+          )}
           <span className="flex items-center gap-1.5">
             <Check className="w-3.5 h-3.5 text-emerald-500" /> No Credit Card
             Required
@@ -443,78 +565,86 @@ export default function Home() {
       )}
 
       {/* PRO Upsell Section */}
-      <section id="pro" className="max-w-4xl mx-auto px-4 py-16">
-        <div className="bg-gradient-to-b from-slate-900 to-slate-900/40 border border-slate-800 rounded-3xl p-8 sm:p-12 relative overflow-hidden">
-          <div className="absolute top-0 right-0 -mt-12 -mr-12 w-64 h-64 bg-rose-500/10 rounded-full blur-3xl pointer-events-none" />
+      {!isPro && (
+        <section id="pro" className="max-w-4xl mx-auto px-4 py-16">
+          <div className="bg-gradient-to-b from-slate-900 to-slate-900/40 border border-slate-800 rounded-3xl p-8 sm:p-12 relative overflow-hidden">
+            <div className="absolute top-0 right-0 -mt-12 -mr-12 w-64 h-64 bg-rose-500/10 rounded-full blur-3xl pointer-events-none" />
 
-          <div className="max-w-xl">
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs font-semibold uppercase tracking-wider mb-6">
-              <Lock className="w-3.5 h-3.5" />
-              Scale Your UGC Engine
-            </div>
+            <div className="max-w-xl">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs font-semibold uppercase tracking-wider mb-6">
+                <Lock className="w-3.5 h-3.5" />
+                Scale Your UGC Engine
+              </div>
 
-            <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight mb-4">
-              Stop Testing Links One by One.
-            </h2>
+              <h2 className="text-3xl sm:text-4xl font-extrabold tracking-tight mb-4">
+                Stop Testing Links One by One.
+              </h2>
 
-            <p className="text-slate-400 text-base mb-8 leading-relaxed">
-              Managing 10, 50, or 250 creators? Don&apos;t waste your mornings
-              pasting links. Upgrade to{" "}
-              <strong className="text-slate-200 font-semibold">
-                RealHookUGC PRO
-              </strong>{" "}
-              and automate your entire quality control workflow.
-            </p>
+              <p className="text-slate-400 text-base mb-8 leading-relaxed">
+                Managing 10, 50, or 250 creators? Don&apos;t waste your
+                mornings pasting links. Upgrade to{" "}
+                <strong className="text-slate-200 font-semibold">
+                  RealHookUGC PRO
+                </strong>{" "}
+                for unlimited scans and automate your quality control
+                workflow.
+              </p>
 
-            <ul className="space-y-3 mb-8 text-sm text-slate-300">
-              <li className="flex items-center gap-3">
-                <CheckCircle2 className="w-4 h-4 text-rose-500 flex-shrink-0" />
-                <span>
-                  <strong className="text-white">
-                    Bulk CSV / Excel Scans:
-                  </strong>{" "}
-                  Audit 50+ creator videos in 10 seconds flat.
+              <ul className="space-y-3 mb-8 text-sm text-slate-300">
+                <li className="flex items-center gap-3">
+                  <CheckCircle2 className="w-4 h-4 text-rose-500 flex-shrink-0" />
+                  <span>
+                    <strong className="text-white">Unlimited Scans:</strong>{" "}
+                    No daily cap — test as many creator videos as you need.
+                  </span>
+                </li>
+                <li className="flex items-center gap-3">
+                  <CheckCircle2 className="w-4 h-4 text-rose-500 flex-shrink-0" />
+                  <span>
+                    <strong className="text-white">
+                      Bulk CSV / Excel Scans (coming soon):
+                    </strong>{" "}
+                    Audit 50+ creator videos in one go.
+                  </span>
+                </li>
+                <li className="flex items-center gap-3">
+                  <CheckCircle2 className="w-4 h-4 text-rose-500 flex-shrink-0" />
+                  <span>
+                    <strong className="text-white">
+                      1-Page Smart Brief Generator (coming soon):
+                    </strong>{" "}
+                    Create playbook-aligned briefs in 3 clicks.
+                  </span>
+                </li>
+              </ul>
+
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
+                <a
+                  href="https://realhookugc.lemonsqueezy.com/checkout/buy/54ee2980-24be-4f18-8670-6fc74304122a"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="bg-white hover:bg-slate-100 text-slate-950 font-bold px-8 py-4 rounded-xl transition shadow-xl text-center flex items-center justify-center gap-2"
+                >
+                  Get PRO Access — $39/month
+                  <ArrowRight className="w-4 h-4" />
+                </a>
+                <span className="text-xs text-slate-500 text-center sm:text-left">
+                  Cancel anytime · Instant access
+                  <br />
+                  Already purchased?{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowLicenseInput(true)}
+                    className="text-rose-400 hover:underline"
+                  >
+                    Activate your license
+                  </button>
                 </span>
-              </li>
-              <li className="flex items-center gap-3">
-                <CheckCircle2 className="w-4 h-4 text-rose-500 flex-shrink-0" />
-                <span>
-                  <strong className="text-white">
-                    1-Page Smart Brief Generator:
-                  </strong>{" "}
-                  Create playbook-aligned briefs in 3 clicks.
-                </span>
-              </li>
-              <li className="flex items-center gap-3">
-                <CheckCircle2 className="w-4 h-4 text-rose-500 flex-shrink-0" />
-                <span>
-                  <strong className="text-white">
-                    Account Warm-Up Radar:
-                  </strong>{" "}
-                  Track if creator algorithms are warmed up before posting.
-                </span>
-              </li>
-            </ul>
-
-            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4">
-              <a
-                href="https://realhookugc.lemonsqueezy.com/checkout/buy/54ee2980-24be-4f18-8670-6fc74304122a"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="bg-white hover:bg-slate-100 text-slate-950 font-bold px-8 py-4 rounded-xl transition shadow-xl text-center flex items-center justify-center gap-2"
-              >
-                Get PRO Access — $39/month
-                <ArrowRight className="w-4 h-4" />
-              </a>
-              <span className="text-xs text-slate-500 text-center sm:text-left">
-                Cancel anytime · Instant access
-                <br />
-                Less than 1 cost of a bad UGC video
-              </span>
+              </div>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       {/* Footer */}
       <footer className="border-t border-slate-800/80 py-8 text-center text-xs text-slate-500">
