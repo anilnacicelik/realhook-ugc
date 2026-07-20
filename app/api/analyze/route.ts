@@ -221,10 +221,15 @@ async function downloadTikTokViaApify(
       item?.videoMeta?.downloadAddr ||
       item?.videoUrl ||
       item?.mediaUrls?.[0] ||
-      item?.video?.downloadAddr;
+      item?.video?.downloadAddr ||
+      item?.webVideoUrl ||
+      item?.videoMeta?.originalDownloadAddr ||
+      item?.downloadAddr;
 
     if (!videoUrl) {
-      console.warn("Apify item had no resolvable video URL, raw item:", JSON.stringify(item).slice(0, 300));
+      console.warn("Apify item had no resolvable video URL.");
+      console.warn("Top-level keys:", Object.keys(item || {}).join(", "));
+      console.warn("Full item JSON:", JSON.stringify(item));
       return null;
     }
 
