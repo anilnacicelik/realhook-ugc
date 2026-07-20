@@ -234,10 +234,31 @@ async function downloadTikTokViaApify(
     }
 
     const videoResp = await fetch(videoUrl);
-    if (!videoResp.ok) return null;
+    if (!videoResp.ok) {
+      console.warn("Apify-resolved video URL returned non-OK status:", videoResp.status);
+      return null;
+    }
 
+    const contentType = videoResp.headers.get("content-type") || "";
     const buffer = Buffer.from(await videoResp.arrayBuffer());
-    if (buffer.length > 20 * 1024 * 1024) return null;
+
+    // Gerçek bir video mu, yoksa HTML/hata sayfası mı geldi kontrol ediyoruz.
+    // mp4 dosyaları genelde ilk birkaç bayttan sonra "ftyp" imzası taşır.
+    const looksLikeVideo =
+      contentType.includes("video") ||
+      buffer.subarray(4, 8).toString("ascii") === "ftyp";
+
+    if (!looksLikeVideo) {
+      console.warn(
+        `Apify video URL did not return real video data (content-type: "${contentType}", first bytes: "${buffer.subarray(0, 20).toString("utf8").replace(/[^\x20-\x7E]/g, "?")}"). Falling back.`
+      );
+      return null;
+    }
+
+    if (buffer.length > 20 * 1024 * 1024) {
+      console.warn("Apify video exceeds 20MB, falling back to tikwm.");
+      return null;
+    }
 
     return {
       buffer,
@@ -279,6 +300,17 @@ async function downloadTikTokViaTikwm(
 
   const arrayBuf = await videoResp.arrayBuffer();
   const buffer = Buffer.from(arrayBuf);
+
+  const contentType = videoResp.headers.get("content-type") || "";
+  const looksLikeVideo =
+    contentType.includes("video") ||
+    buffer.subarray(4, 8).toString("ascii") === "ftyp";
+
+  if (!looksLikeVideo) {
+    throw new Error(
+      "The downloaded file wasn't a valid video. The link may be broken or the video removed."
+    );
+  }
 
   if (buffer.length > 20 * 1024 * 1024) {
     throw new Error(
